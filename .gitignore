@@ -1,0 +1,31 @@
+# Secrets
+.env
+.envrc
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Data / artifacts (never commit — too large)
+data/
+tmp_dl/
+checkpoints/
+results/
+*.npz
+*.nii.gz
+*.ckpt
+*.safetensors
+*.pt
+*.bin
+
+# Logs
+*.log
+*_log.txt
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
