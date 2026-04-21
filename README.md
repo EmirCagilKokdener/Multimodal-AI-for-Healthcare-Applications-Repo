@@ -65,12 +65,12 @@ Slice caches are created automatically by `preprocess.sh` into
 ### 1. Preprocess slices (runs for hours — tmux recommended)
 
 ```bash
-./scripts/preprocess.sh train    # ~330 GB for 47k scans
-./scripts/preprocess.sh val
+./scripts/preprocess.sh train    # ~140 GB for 47148 scans
+./scripts/preprocess.sh val      # ~9 GB for 3039 scans
 ```
 
 Each NIfTI is downloaded, 16 RGB slices (384×384, 3 CT windows) are extracted,
-saved as a compressed `.npz` (~7 MB), and the original NIfTI is deleted.
+saved as a compressed `.npz` (~3 MB), and the original NIfTI is deleted.
 
 ### 2. Fine-tune
 
