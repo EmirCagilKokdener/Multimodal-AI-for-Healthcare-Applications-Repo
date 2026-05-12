@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Generate Turkish radiology reports (XML format) with MedGemma 1.5 + LoRA on CT-RATE slices.
+"""Generate Turkish radiology reports with MedGemma 1.5 + LoRA on CT-RATE slices.
+
+Model produces structured XML (<findings>...</findings><impressions>...</impressions>);
+this script parses it and writes user-facing reports with `Bulgular:` / `İzlenim:`
+headers so localhost UIs can display them directly. Falls back to writing the raw
+model output if the XML is malformed.
 
 Loads preprocessed .npz slices (from preprocess.py --split val) and the LoRA
-adapter from the HuggingFace Hub by default. Writes one .txt per accession
-(raw XML) and a merged results_all.xlsx with parsed Pred_Findings /
-Pred_Impressions columns.
+adapter from the HuggingFace Hub by default. Writes one .txt per accession plus
+a merged results_all.xlsx with parsed Pred_Findings / Pred_Impressions columns.
 
 Generation: greedy decoding only — no repetition_penalty / no_repeat_ngram_size
 (those caused XML corruption like <impressons> and </findings}).
@@ -44,11 +48,25 @@ def parse_args():
     return p.parse_args()
 
 
-def parse_xml_report(text: str) -> tuple[str, str]:
-    """Extract findings and impressions from XML output."""
+def parse_report(text: str) -> tuple[str, str]:
+    """Extract findings and impressions from either XML or Bulgular/İzlenim format."""
     f = re.search(r"<findings>(.*?)</findings>", text, re.DOTALL)
     i = re.search(r"<impressions>(.*?)</impressions>", text, re.DOTALL)
-    return (f.group(1).strip() if f else "", i.group(1).strip() if i else "")
+    if f or i:
+        return (f.group(1).strip() if f else "", i.group(1).strip() if i else "")
+    bf = re.search(r"Bulgular:\s*\n?(.*?)(?=\n\s*İzlenim:|\Z)", text, re.DOTALL)
+    bi = re.search(r"İzlenim:\s*\n?(.*)\Z", text, re.DOTALL)
+    return (bf.group(1).strip() if bf else "", bi.group(1).strip() if bi else "")
+
+
+def format_report(findings: str, impressions: str) -> str:
+    """Render parsed sections in the Turkish radiology convention used by the UI."""
+    parts = []
+    if findings:
+        parts.append(f"Bulgular:\n{findings}")
+    if impressions:
+        parts.append(f"İzlenim:\n{impressions}")
+    return "\n\n".join(parts)
 
 
 def generate_report(model, processor, slice_images, prompt_text: str, max_new_tokens: int) -> str:
@@ -102,7 +120,7 @@ def main():
     remaining = [a for a in df["AccessionNo"] if a not in already]
     print(f"total={len(df)}  already_done={len(already)}  remaining={len(remaining)}\n")
 
-    ok = fail = skipped = no_slice = valid_xml = 0
+    ok = fail = skipped = no_slice = valid_parse = 0
     for _, row in tqdm(df.iterrows(), total=len(df), desc="generating"):
         acc = row["AccessionNo"]
         out_txt = args.out_dir / f"{acc}_report_tr.txt"
@@ -123,17 +141,19 @@ def main():
             slice_images = [Image.fromarray(slices_arr[i]) for i in range(slices_arr.shape[0])]
             del slices_arr, data
 
-            report = generate_report(model, processor, slice_images, PROMPT_TR, args.max_new_tokens)
-            out_txt.write_text(report, encoding="utf-8")
+            raw = generate_report(model, processor, slice_images, PROMPT_TR, args.max_new_tokens)
+            findings, impressions = parse_report(raw)
+            is_valid = bool(findings) and bool(impressions)
+            if is_valid:
+                valid_parse += 1
+                out_txt.write_text(format_report(findings, impressions), encoding="utf-8")
+            else:
+                out_txt.write_text(raw, encoding="utf-8")
             ok += 1
 
-            findings, impressions = parse_xml_report(report)
-            if findings and impressions:
-                valid_xml += 1
-
             if ok % 20 == 0:
-                pct = 100 * valid_xml / ok
-                print(f"\n[{ok}] {acc} | XML valid: {valid_xml}/{ok} ({pct:.1f}%)")
+                pct = 100 * valid_parse / ok
+                print(f"\n[{ok}] {acc} | parsed: {valid_parse}/{ok} ({pct:.1f}%)")
                 print(f"  Findings:    {findings[:100]}..." if findings else "  No findings parsed")
                 print(f"  Impressions: {impressions[:100]}..." if impressions else "  No impressions parsed")
 
@@ -153,7 +173,7 @@ def main():
         txt = args.out_dir / f"{acc}_report_tr.txt"
         if txt.exists():
             generated = txt.read_text(encoding="utf-8").strip()
-            pred_f, pred_i = parse_xml_report(generated)
+            pred_f, pred_i = parse_report(generated)
         else:
             generated, pred_f, pred_i = "[NOT GENERATED]", "", ""
         rows.append({
@@ -167,9 +187,9 @@ def main():
     excel_out = args.out_dir / "results_all.xlsx"
     pd.DataFrame(rows).to_excel(excel_out, index=False, engine="openpyxl")
 
-    pct = 100 * valid_xml / max(ok, 1)
+    pct = 100 * valid_parse / max(ok, 1)
     print(f"\ndone: ok={ok} fail={fail} skipped={skipped} no_slice={no_slice}")
-    print(f"valid XML: {valid_xml}/{ok} ({pct:.1f}%)")
+    print(f"parsed: {valid_parse}/{ok} ({pct:.1f}%)")
     print(f"excel: {excel_out}")
 
 
