@@ -48,13 +48,17 @@ def parse_args():
 def build_target_text(row) -> str | None:
     findings = str(row.get("Findings_TR", "") or "").strip()
     impression = str(row.get("Impressions_TR", "") or "").strip()
+    if findings.lower() in ("nan", "none"):
+        findings = ""
+    if impression.lower() in ("nan", "none"):
+        impression = ""
     if not findings and not impression:
         return None
     out = ""
     if findings:
-        out += f"Bulgular:\n{findings}\n\n"
+        out += f"<findings>\n{findings}\n</findings>\n\n"
     if impression:
-        out += f"İzlenim:\n{impression}"
+        out += f"<impressions>\n{impression}\n</impressions>"
     return out.strip()
 
 

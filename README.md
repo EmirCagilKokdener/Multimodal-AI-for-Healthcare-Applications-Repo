@@ -2,7 +2,8 @@
 
 Fine-tune and run inference with Google **MedGemma 1.5 4B IT** on the
 [CT-RATE](https://huggingface.co/datasets/ibrahimhamamci/CT-RATE) dataset to
-generate **Turkish radiology reports** (`Bulgular` / `İzlenim`) from 3D chest CT.
+generate **Turkish radiology reports** in XML format
+(`<findings>...</findings><impressions>...</impressions>`) from 3D chest CT.
 
 The trained LoRA adapter is published at
 **[enderorman/medgemma-1.5-ct-rate-tr](https://huggingface.co/enderorman/medgemma-1.5-ct-rate-tr)**
@@ -96,8 +97,9 @@ Loads the LoRA from HF Hub by default. To use a local checkpoint instead:
 LORA=./checkpoints/checkpoint-8841 ./scripts/inference.sh
 ```
 
-One `<AccessionNo>_report_tr.txt` per scan is written to `./results/`, plus a
-merged `results_all.xlsx` with ground-truth vs. generated columns.
+One `<AccessionNo>_report_tr.txt` per scan (raw XML) is written to `./results/`,
+plus a merged `results_all.xlsx` with ground-truth, generated XML, and parsed
+`Pred_Findings` / `Pred_Impressions` columns.
 
 ## Direct Python usage (no shell wrapper)
 

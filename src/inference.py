@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Generate Turkish radiology reports with MedGemma 1.5 + LoRA on CT-RATE slices.
+"""Generate Turkish radiology reports (XML format) with MedGemma 1.5 + LoRA on CT-RATE slices.
 
 Loads preprocessed .npz slices (from preprocess.py --split val) and the LoRA
 adapter from the HuggingFace Hub by default. Writes one .txt per accession
-and a merged results_all.xlsx.
+(raw XML) and a merged results_all.xlsx with parsed Pred_Findings /
+Pred_Impressions columns.
+
+Generation: greedy decoding only — no repetition_penalty / no_repeat_ngram_size
+(those caused XML corruption like <impressons> and </findings}).
 """
 import argparse
 import gc
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -36,13 +41,17 @@ def parse_args():
                    help="LoRA adapter: HF repo ID or local path (default: %(default)s)")
     p.add_argument("--model-id", default=DEFAULT_MODEL)
     p.add_argument("--max-new-tokens", type=int, default=1024)
-    p.add_argument("--repetition-penalty", type=float, default=1.1)
-    p.add_argument("--no-repeat-ngram-size", type=int, default=4)
     return p.parse_args()
 
 
-def generate_report(model, processor, slice_images, prompt_text: str, max_new_tokens: int,
-                    repetition_penalty: float, no_repeat_ngram_size: int) -> str:
+def parse_xml_report(text: str) -> tuple[str, str]:
+    """Extract findings and impressions from XML output."""
+    f = re.search(r"<findings>(.*?)</findings>", text, re.DOTALL)
+    i = re.search(r"<impressions>(.*?)</impressions>", text, re.DOTALL)
+    return (f.group(1).strip() if f else "", i.group(1).strip() if i else "")
+
+
+def generate_report(model, processor, slice_images, prompt_text: str, max_new_tokens: int) -> str:
     content = [{"type": "text", "text": prompt_text}]
     for i, im in enumerate(slice_images, 1):
         content.append({"type": "image", "image": im})
@@ -53,6 +62,7 @@ def generate_report(model, processor, slice_images, prompt_text: str, max_new_to
         messages, add_generation_prompt=True, continue_final_message=False,
         return_tensors="pt", tokenize=True, return_dict=True,
     )
+    input_len = inputs["input_ids"].shape[1]
 
     with torch.inference_mode():
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -60,17 +70,11 @@ def generate_report(model, processor, slice_images, prompt_text: str, max_new_to
             **inputs,
             do_sample=False,
             max_new_tokens=max_new_tokens,
-            repetition_penalty=repetition_penalty,
-            no_repeat_ngram_size=no_repeat_ngram_size,
             use_cache=True,
         )
 
-    out_text = processor.post_process_image_text_to_text(generated, skip_special_tokens=True)[0]
-    in_text = processor.post_process_image_text_to_text(inputs["input_ids"], skip_special_tokens=True)[0]
-    pos = out_text.find(in_text)
-    if 0 <= pos <= 2:
-        out_text = out_text[pos + len(in_text):].strip()
-    return out_text
+    gen_ids = generated[0][input_len:].tolist()
+    return processor.tokenizer.decode(gen_ids, skip_special_tokens=True)
 
 
 def main():
@@ -98,7 +102,7 @@ def main():
     remaining = [a for a in df["AccessionNo"] if a not in already]
     print(f"total={len(df)}  already_done={len(already)}  remaining={len(remaining)}\n")
 
-    ok = fail = skipped = no_slice = 0
+    ok = fail = skipped = no_slice = valid_xml = 0
     for _, row in tqdm(df.iterrows(), total=len(df), desc="generating"):
         acc = row["AccessionNo"]
         out_txt = args.out_dir / f"{acc}_report_tr.txt"
@@ -119,15 +123,19 @@ def main():
             slice_images = [Image.fromarray(slices_arr[i]) for i in range(slices_arr.shape[0])]
             del slices_arr, data
 
-            report = generate_report(
-                model, processor, slice_images, PROMPT_TR,
-                args.max_new_tokens, args.repetition_penalty, args.no_repeat_ngram_size,
-            )
+            report = generate_report(model, processor, slice_images, PROMPT_TR, args.max_new_tokens)
             out_txt.write_text(report, encoding="utf-8")
             ok += 1
 
-            gt = str(row.get("Findings_TR", ""))[:120]
-            print(f"\n[{ok}] {acc}\n  GT:   {gt}...\n  Pred: {report[:120]}...")
+            findings, impressions = parse_xml_report(report)
+            if findings and impressions:
+                valid_xml += 1
+
+            if ok % 20 == 0:
+                pct = 100 * valid_xml / ok
+                print(f"\n[{ok}] {acc} | XML valid: {valid_xml}/{ok} ({pct:.1f}%)")
+                print(f"  Findings:    {findings[:100]}..." if findings else "  No findings parsed")
+                print(f"  Impressions: {impressions[:100]}..." if impressions else "  No impressions parsed")
 
         except Exception as e:
             fail += 1
@@ -143,17 +151,25 @@ def main():
     for _, row in df.iterrows():
         acc = str(row["AccessionNo"]).strip()
         txt = args.out_dir / f"{acc}_report_tr.txt"
-        generated = txt.read_text(encoding="utf-8").strip() if txt.exists() else "[NOT GENERATED]"
+        if txt.exists():
+            generated = txt.read_text(encoding="utf-8").strip()
+            pred_f, pred_i = parse_xml_report(generated)
+        else:
+            generated, pred_f, pred_i = "[NOT GENERATED]", "", ""
         rows.append({
             "AccessionNo": acc,
             "GT_Findings_TR": str(row.get("Findings_TR", "")),
             "GT_Impressions_TR": str(row.get("Impressions_TR", "")),
             "Generated_Report": generated,
+            "Pred_Findings": pred_f,
+            "Pred_Impressions": pred_i,
         })
     excel_out = args.out_dir / "results_all.xlsx"
     pd.DataFrame(rows).to_excel(excel_out, index=False, engine="openpyxl")
 
+    pct = 100 * valid_xml / max(ok, 1)
     print(f"\ndone: ok={ok} fail={fail} skipped={skipped} no_slice={no_slice}")
+    print(f"valid XML: {valid_xml}/{ok} ({pct:.1f}%)")
     print(f"excel: {excel_out}")
 
 
